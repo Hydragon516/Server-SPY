@@ -1,16 +1,40 @@
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QThread, Qt
 from PyQt5.QtWidgets import QAbstractItemView, QLabel, QListWidget, QLineEdit, QDialog, QPushButton, QHBoxLayout, \
-    QVBoxLayout, QApplication, QProgressBar, QListWidgetItem
+    QVBoxLayout, QApplication, QProgressBar, QListWidgetItem, QSlider
 import paramiko
 import webbrowser
+import os
+from cryptography.fernet import Fernet
 
+key = None
 global_server_list = {}
 
 target_server = None
+new_server = None
 
 class MyMainGUI(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        global key
+
+        if not os.path.isfile("key.txt"):
+            key = Fernet.generate_key()
+            with open("key.txt", "wb") as f:
+                f.write(key)
+            f.close()
+        else:
+            with open("key.txt", "rb") as f:
+                key = f.read()
+            f.close()
+        
+        if not os.path.isfile("server.txt"):
+            with open("server.txt", "w") as f:
+                pass
+            f.close()
+        
+        self.setWindowOpacity(1.0)
+
+        self.setWindowFlags(Qt.WindowTitleHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
         self.add_button = QPushButton("서버 추가")
         self.github_button = QPushButton("최신 버전 다운로드 (GitHub)")
         self.add_IP = QLineEdit(self)
@@ -25,6 +49,9 @@ class MyMainGUI(QDialog):
         self.add_PORT.setText("22")
         self.server_list = QListWidget(self)
         self.server_list.resize(600, 600)
+        self.opacity_slider = QSlider(Qt.Horizontal, self)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_label = QLabel("투명도 조절", self)
         
         self.cpu_bar = QProgressBar(self)
         self.mem_bar = QProgressBar(self)
@@ -46,6 +73,7 @@ class MyMainGUI(QDialog):
             self.gpu_label.append(QLabel("GPU{} : ".format(i), self))
 
         self.search_button = QPushButton("서버 (재)검색")
+        self.remove_button = QPushButton("선택된 서버 삭제")
 
         hbox = QHBoxLayout()
         hbox.addStretch(0)
@@ -82,6 +110,13 @@ class MyMainGUI(QDialog):
 
         hbox3 = QHBoxLayout()
         hbox3.addWidget(self.search_button)
+        hbox3.addWidget(self.remove_button)
+
+        hbox4 = QHBoxLayout()
+        hbox4.addWidget(self.status_label)
+        hbox4.addStretch(1)
+        hbox4.addWidget(self.opacity_label)
+        hbox4.addWidget(self.opacity_slider)
 
         vbox = QVBoxLayout()
         vbox.addStretch(1)
@@ -93,11 +128,11 @@ class MyMainGUI(QDialog):
         vbox.addStretch(1)
         vbox.addLayout(hbox3)
         vbox.addStretch(1)
-        vbox.addWidget(self.status_label)
+        vbox.addLayout(hbox4)
 
         self.setLayout(vbox)
 
-        self.setWindowTitle('Server SPY v1.1')
+        self.setWindowTitle('Server SPY v1.2')
         self.setGeometry(300, 300, 700, 500)
 
 
@@ -109,10 +144,17 @@ class MyMain(MyMainGUI):
         super().__init__(parent)
 
         self.search_button.clicked.connect(self.search)
+        self.remove_button.clicked.connect(self.remove)
+
+        self.opacity_slider.valueChanged.connect(lambda: self.setWindowOpacity(1.0 - self.opacity_slider.value() / 100 + 0.1))
+
         self.add_button.clicked.connect(self.add)
         self.github_button.clicked.connect(lambda: webbrowser.open('https://github.com/Hydragon516/Server-SPY'))
         self.server_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.server_list.itemClicked.connect(self.chkItemClicked)
+
+        self.th_add = adder(parent=self)
+        self.th_add.updated_label.connect(self.main_status_update)
 
         self.th_search = searcher(parent=self)
         self.th_search.updated_list.connect(self.server_list_update)
@@ -124,21 +166,19 @@ class MyMain(MyMainGUI):
 
         self.show()
     
+    @pyqtSlot()
     def add(self):
+        global new_server
+
         ip = self.add_IP.text()
         id = self.add_ID.text()
         pw = self.add_PW.text()
         port = self.add_PORT.text()
 
-        if ip == "" or id == "" or pw == "" or " " in ip or " " in id or " " in pw or " " in port:
-            print(ip, id, pw, port)
-            self.status_label.setText("서버 추가 실패! (빈칸이 있습니다.)")
+        new_server = (ip, id, pw, port)
 
-        else:
-            with open("server.txt", "a") as f:
-                f.write("{},{},{},{}\n".format(ip, id, pw, port))
-            f.close()
-            self.status_label.setText("서버 추가 완료! (검색 버튼을 눌러주세요.)")
+        self.th_add.start()
+
 
     @pyqtSlot()
     def chkItemClicked(self):
@@ -154,14 +194,18 @@ class MyMain(MyMainGUI):
         server_idx = self.server_list.currentIndex().row()
         server_ip = server[0].text().split(' ')[0]
 
-        try:
-            id, pw, port = global_server_list[server_idx]
-            target_server = (server_ip, id, pw, port)
-        except:
-            return
+        ip, id, pw, port = global_server_list[server_idx]
 
-        if id == None or pw == None:
-            self.status_label.setText("연결 불가능한 서버입니다.".format(id))
+        try:
+            cli = paramiko.SSHClient()
+            cli.set_missing_host_key_policy(paramiko.AutoAddPolicy)
+            cli.connect(ip, port=port, username=id, password=pw)
+            cli.close()
+            target_server = (ip, id, pw, port)
+        
+        except:
+            self.status_label.setText("연결 불가능한 서버입니다.")
+            return
         
         else:
             self.th_status.start()
@@ -174,6 +218,46 @@ class MyMain(MyMainGUI):
             self.gpu_bar[i].reset()
 
         self.th_status.terminate()
+        self.server_list.clear()
+        self.th_search.start()
+
+    @pyqtSlot()
+    def remove(self):
+        global global_server_list
+        global key
+
+        server_idx = self.server_list.currentIndex().row()
+        ip, id, pw, port = global_server_list[server_idx]
+        global_server_list.pop(server_idx)
+
+        global_server_list_buffer = {}
+
+        with open("server.txt", "w") as f:
+            cnt = 0
+            for i in global_server_list.keys():
+                ip, id, pw, port = global_server_list[i]
+                server_info = "{},{},{},{}".format(ip, id, pw, port)
+                fernet = Fernet(key)
+                server_info = server_info.encode()
+                encrypt_str = fernet.encrypt(server_info)
+                encrypt_str = encrypt_str.decode()
+                f.write(encrypt_str + '\n')
+
+                global_server_list_buffer[cnt] = global_server_list[i]
+                cnt += 1
+        
+        global_server_list = global_server_list_buffer
+            
+        try:
+            self.th_status.terminate()
+        except:
+            pass
+        
+        self.cpu_bar.reset()
+        self.mem_bar.reset()
+        for i in range(len(self.gpu_bar)):
+            self.gpu_bar[i].reset()
+            
         self.server_list.clear()
         self.th_search.start()
 
@@ -232,6 +316,57 @@ class MyMain(MyMainGUI):
         self.status_label.setText(msg)
 
 
+class adder(QThread):
+    updated_label = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__()
+        self.main = parent
+
+    def __del__(self):
+        self.wait()
+
+    def run(self):
+        global key
+        global new_server
+
+        ip, id, pw, port = new_server
+
+        if ip == "" or id == "" or pw == "" or "" == port:
+            self.updated_label.emit("서버 추가 실패! (빈칸이 있습니다.)")
+            return
+
+        else:
+            if [ip, id, pw, int(port)] in global_server_list.values():
+                self.updated_label.emit("서버 추가 실패! (이미 추가된 서버입니다.)")
+                return
+            try:
+                self.updated_label.emit("서버 추가하는 중...")
+
+                cli = paramiko.SSHClient()
+                cli.set_missing_host_key_policy(paramiko.AutoAddPolicy)
+                cli.connect(ip, port=port, username=id, password=pw)
+                cli.close()
+
+                with open("server.txt", "a") as f:
+                    server_info = "{},{},{},{}".format(ip, id, pw, port)
+                    fernet = Fernet(key)
+                    server_info = server_info.encode()
+                    encrypt_str = fernet.encrypt(server_info)
+                    encrypt_str = encrypt_str.decode()
+                    f.write(encrypt_str + '\n')
+                f.close()
+                
+                self.updated_label.emit("서버 추가 완료!")
+                self.main.th_search.terminate()
+                self.main.server_list.clear()
+                self.main.th_search.start()
+
+            except:
+                self.updated_label.emit("서버 추가 실패! (서버 연결 실패)")
+                return
+
+
 class status_run(QThread):
     updated_status = pyqtSignal(list)
     updated_label = pyqtSignal(str)
@@ -269,7 +404,7 @@ class status_run(QThread):
         gpu_info = stdout.read().decode('utf-8').replace('\n', '')
         for i in range(1, num_gpu + 1):
             gpu_name = str(((gpu_info.split('Product Name')[i]).split(':')[1]).split('Product Brand')[0])
-            gpu_name = gpu_name.replace(' ', '').replace('NVIDIA', '')
+            gpu_name = gpu_name.replace(' ', '').replace('NVIDIA', '').replace('GeForce', '')
             gpu_names.append(gpu_name)
         return gpu_names
     
@@ -324,8 +459,8 @@ class searcher(QThread):
 
     def run(self):
         global global_server_list
+        global key
 
-        self.updated_list.emit("{:<35}{:<25}".format('IP', 'Name'))
         self.updated_label.emit("서버 검색 중...")
 
         ok_cnt = 0
@@ -334,31 +469,35 @@ class searcher(QThread):
         with open("server.txt", "r") as f:
             server_idx = 0
             for line in f:
-                line = line.replace('\n', '')
+                encrypt_str = line.replace('\n', '')
+                encrypt_str = encrypt_str.encode()
+                fernet = Fernet(key)
+                decrypt_str = fernet.decrypt(encrypt_str)
+                decrypt_str = decrypt_str.decode()
  
-                server_ip = line.split(',')[0].replace(' ', '')
-                server_id = line.split(',')[1].replace(' ', '')
-                server_pw = line.split(',')[2].replace(' ', '')
-                server_port = line.split(',')[3].replace(' ', '')
+                server_ip = decrypt_str.split(',')[0].replace(' ', '')
+                server_id = decrypt_str.split(',')[1].replace(' ', '')
+                server_pw = decrypt_str.split(',')[2].replace(' ', '')
+                server_port = decrypt_str.split(',')[3].replace(' ', '')
                 server_port = int(server_port)
-
-                server_idx += 1
 
                 try:
                     cli = paramiko.SSHClient()
                     cli.set_missing_host_key_policy(paramiko.AutoAddPolicy)
                     
                     cli.connect(server_ip, port=server_port, username=server_id, password=server_pw)
-                    global_server_list[server_idx] = [server_id, server_pw, server_port]
+                    global_server_list[server_idx] = [server_ip, server_id, server_pw, server_port]
 
                     self.updated_list.emit("{:<25}{:<25}".format(server_ip, server_id))
                     cli.close()
                     ok_cnt += 1
 
                 except:
-                    global_server_list[server_idx] = [None, None, None]
+                    global_server_list[server_idx] = [server_ip, server_id, server_pw, server_port]
                     self.updated_list.emit("{:<25}{} [Disconnected]".format(server_ip, server_id))
                     not_ok_cnt += 1
+                
+                server_idx += 1
         
         f.close()
 
